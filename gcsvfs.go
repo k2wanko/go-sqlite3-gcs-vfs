@@ -26,6 +26,7 @@ type GCSVFS struct {
 // GCSFile implements vfs file.
 type GCSFile struct {
 	ctx context.Context
+	vfs *GCSVFS
 
 	pendingWrite bool
 	tempFile     *os.File
@@ -70,8 +71,8 @@ func (vfs *GCSVFS) FullPathname(path string) (fullpath string, err error) {
 }
 
 func (vfs *GCSVFS) Delete(path string, dirSync int) error {
-	part := strings.Split(path, "/")
-	obj := vfs.client.Bucket("k2wanko-sqlite3").Object(part[len(part)-1])
+	info := vfs.lookupPathInfo(path)
+	obj := vfs.client.Bucket(info.bucket).Object(info.path)
 	return obj.Delete(vfs.ctx)
 }
 
@@ -88,7 +89,24 @@ func (vfs *GCSVFS) Open(name string, flags int) (file interface{}, err error) {
 		vfs.client = client
 	}
 
-	infoKey := name
+	pathInfo := vfs.lookupPathInfo(name)
+	obj := vfs.client.Bucket(pathInfo.bucket).Object(pathInfo.path)
+	tempFile, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR, 0755)
+	if err != nil {
+		return nil, err
+	}
+
+	file = &GCSFile{
+		ctx:      ctx,
+		vfs:      vfs,
+		tempFile: tempFile,
+		obj:      obj,
+	}
+	return
+}
+
+func (vfs *GCSVFS) lookupPathInfo(path string) *pathInfo {
+	infoKey := path
 	suffix := ""
 	if strings.HasSuffix(infoKey, "-journal") {
 		infoKey = strings.TrimSuffix(infoKey, "-journal")
@@ -99,25 +117,18 @@ func (vfs *GCSVFS) Open(name string, flags int) (file interface{}, err error) {
 		suffix = "-wal"
 	}
 
-	pathInfo := vfs.pathInfos[infoKey]
-	obj := vfs.client.Bucket(pathInfo.bucket).Object(pathInfo.path + suffix)
-	tempFile, err := os.OpenFile(name, os.O_CREATE|os.O_RDWR, 0755)
-	if err != nil {
-		return nil, err
+	info := vfs.pathInfos[infoKey]
+	return &pathInfo{
+		bucket: info.bucket,
+		path:   info.path + suffix,
 	}
-
-	file = &GCSFile{
-		ctx:      ctx,
-		tempFile: tempFile,
-		obj:      obj,
-	}
-	return
 }
 
 func (f *GCSFile) Close() (err error) {
 	if f.tempFile != nil {
 		f.tempFile.Close()
 		os.Remove(f.tempFile.Name())
+		delete(f.vfs.pathInfos, f.tempFile.Name())
 	}
 	return
 }
